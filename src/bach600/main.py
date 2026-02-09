@@ -6,7 +6,7 @@ from bach600 import config, dataset, gnn, utils
 
 opt = config.get_config_options()
 
-use_cuda = torch.cuda.is_available() and opt.use_gpu
+use_cuda = torch.cuda.is_available() and opt.gpu
 device = torch.device("cuda") if use_cuda else torch.device("cpu")
 
 print("Loading dataset...")
