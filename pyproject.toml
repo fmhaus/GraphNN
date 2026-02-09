@@ -1,0 +1,20 @@
+[project]
+name = "bach600"
+version = "0.1.0"
+description = "bach600"
+authors = [
+    {name = "Florian Haus", email = "s4923399@stud.uni-frankfurt.de"}
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pandas>=2.0.0",
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.65.0",
+    "pyarrow>=12.0"
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
