@@ -90,7 +90,6 @@ class GraphFeatures():
             nunique = df[c].nunique(dropna=False)
             if nunique < 0.7 * len(df):
                 df[c] = df[c].astype("category")
-                print(f"{c} to category")
 
 
         df = df.sort_values([SPATIAL_VAR, TIME_VAR], kind="quicksort")
@@ -136,25 +135,22 @@ class MaskSet:
                  unseen_split: float, device: torch.device, seed: int, global_threshold: bool = False):
         self.mask_count = mask_count
 
-        self.mask_tensor = torch.empty((mask_count, space_dim, time_dim), dtype=torch.bool)
+        # Generate masks using random numbers
+        noise = torch.randn((mask_count, space_dim, time_dim), device=device, generator=torch.manual_seed(seed))
+        noise = noise.reshape(mask_count * space_dim, 1, time_dim)
 
-        for i in range(mask_count):
-            # Generate masks using random numbers
-            noise = torch.randn((space_dim, time_dim), device=device, generator=torch.manual_seed(seed))
-            noise = noise.reshape(space_dim, 1, time_dim)
+        # Use smooth gaussian noise. The kernel size determines the smoothness (and length of outtages)
+        kernel = torch.ones((1, 1, kernel_size), device=device) / kernel_size
+        smooth_noise = torch.nn.functional.conv1d(noise, kernel, padding='same')
+        smooth_noise = smooth_noise.reshape(mask_count, space_dim, time_dim)
 
-            # Use smooth gaussian noise. The kernel size determines the smoothness (and length of outtages)
-            kernel = torch.ones((1, 1, kernel_size), device=device) / kernel_size
-            smooth_noise = torch.nn.functional.conv1d(noise, kernel, padding='same')
-            smooth_noise = smooth_noise.reshape(space_dim, time_dim)
-
-            # Use quantile to get a threshold to match the expected unseen probability
-            if global_threshold:
-                unseen_threshold = torch.quantile(smooth_noise, 1 - unseen_split)
-                self.mask_tensor[i] = smooth_noise <= unseen_threshold
-            else:
-                unseen_threshold = torch.quantile(smooth_noise.flatten(), 1 - unseen_split)
-                self.mask_tensor[i] = smooth_noise <= unseen_threshold
+        # Use quantile to get a threshold to match the expected unseen probability
+        if global_threshold:
+            unseen_threshold = torch.quantile(smooth_noise, 1 - unseen_split)
+            self.mask_tensor = smooth_noise <= unseen_threshold
+        else:
+            unseen_threshold = torch.quantile(smooth_noise.flatten(1), 1 - unseen_split)
+            self.mask_tensor = smooth_noise <= unseen_threshold[:, None, None]
     
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, features: GraphFeatures, masks: MaskSet, window_size: int):

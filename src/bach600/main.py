@@ -16,7 +16,7 @@ N, T, F = graph_features.features_tensor.shape  # nodes, times, features
 H = opt.window_size
 
 training_set = dataset.Dataset(graph_features, 
-                               dataset.MaskSet(500, N, T, opt.noise_kernel_size, opt.unseen_split, device, seed=420),
+                               dataset.MaskSet(200, N, T, opt.noise_kernel_size, opt.unseen_split, device, seed=420),
                                opt.window_size)
 validation_set = dataset.Dataset(graph_features, 
                                  dataset.MaskSet(20, N, T, opt.noise_kernel_size, opt.unseen_split, device, seed=69),
