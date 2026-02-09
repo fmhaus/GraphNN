@@ -11,7 +11,7 @@ device = torch.device("cuda") if use_cuda else torch.device("cpu")
 
 print("Loading dataset...")
 
-graph_features = dataset.GraphFeatures(device, dataset.FeatureOptions.TARGET_ONLY)
+graph_features = dataset.GraphFeatures(opt.dataset_folder, device, dataset.FeatureOptions.TARGET_ONLY)
 N, T, F = graph_features.features_tensor.shape  # nodes, times, features
 H = opt.window_size
 

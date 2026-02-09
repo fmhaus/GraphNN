@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 from enum import Enum
+import os
 
 class VariableType(Enum):
     NUMERICAL = 0
@@ -64,11 +65,11 @@ class FeatureOptions(Enum):
     TARGET_ONLY = 0
 
 class GraphFeatures():
-    def __init__(self, device=torch.device, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
+    def __init__(self, dataset_folder: str, device=torch.device, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
         TIME_VAR = "date"
         SPATIAL_VAR = "counter_name"
 
-        df = pd.read_parquet("dataset/berlin_data.parquet")
+        df = pd.read_parquet(os.path.join(dataset_folder, "berlin_data.parquet"))
 
         df = df.sort_values([SPATIAL_VAR, TIME_VAR], kind="mergesort")
 
@@ -88,7 +89,7 @@ class GraphFeatures():
         assert len(counts) == self.n_space * self.n_time  # check full cartesian product of space/time
         assert counts.eq(1).all()               # every pair appears exactly once
 
-        binary_df = pd.read_parquet("dataset/berlin_adjacency_binary.parquet")
+        binary_df = pd.read_parquet(os.path.join(dataset_folder, "berlin_adjacency_binary.parquet"))
         self.adjacency_matrix = torch.from_numpy(binary_df.to_numpy(dtype=np.float32))
 
         feature_slices = []
