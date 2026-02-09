@@ -71,24 +71,27 @@ class GraphFeatures():
 
         df = pd.read_parquet(os.path.join(dataset_folder, "berlin_data.parquet"))
 
-        # Downcast to save memory
+        # Downcast types to save memory
         float_cols = df.select_dtypes(include="float64").columns
-        df[float_cols] = df[float_cols].astype("float32")
-
         int_cols = df.select_dtypes(include="int64").columns
-        df[int_cols] = df[int_cols].apply(pd.to_numeric, downcast="integer")
-
         bool_cols = df.select_dtypes(include="bool").columns
-        df[bool_cols] = df[bool_cols].astype("boolean")
-
         obj_cols = df.select_dtypes(include="object").columns
 
+        for c in float_cols:
+            df[c] = df[c].astype("float32")
+
+        for c in int_cols:
+            df[c] = pd.to_numeric(df[c], downcast="integer")
+
+        for c in bool_cols:
+            df[c] = df[c].astype("boolean")
+
         for c in obj_cols:
-            # Heuristic: category if not almost-unique
             nunique = df[c].nunique(dropna=False)
             if nunique < 0.7 * len(df):
                 df[c] = df[c].astype("category")
                 print(f"{c} to category")
+
 
         df = df.sort_values([SPATIAL_VAR, TIME_VAR], kind="quicksort")
 
