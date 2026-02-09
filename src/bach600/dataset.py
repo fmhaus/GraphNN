@@ -65,16 +65,32 @@ class FeatureOptions(Enum):
     TARGET_ONLY = 0
 
 class GraphFeatures():
-    def __init__(self, dataset_folder: str, device=torch.device, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
+    def __init__(self, dataset_folder: str, device, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
         TIME_VAR = "date"
         SPATIAL_VAR = "counter_name"
 
         df = pd.read_parquet(os.path.join(dataset_folder, "berlin_data.parquet"))
 
-        df = df.sort_values([SPATIAL_VAR, TIME_VAR], kind="mergesort")
+        # Downcast to save memory
+        float_cols = df.select_dtypes(include="float64").columns
+        df[float_cols] = df[float_cols].astype("float32")
 
-        df[SPATIAL_VAR] = df[SPATIAL_VAR].astype("category")
-        df[TIME_VAR] = df[TIME_VAR].astype("category")
+        int_cols = df.select_dtypes(include="int64").columns
+        df[int_cols] = df[int_cols].apply(pd.to_numeric, downcast="integer")
+
+        bool_cols = df.select_dtypes(include="bool").columns
+        df[bool_cols] = df[bool_cols].astype("boolean")
+
+        obj_cols = df.select_dtypes(include="object").columns
+
+        for c in obj_cols:
+            # Heuristic: category if not almost-unique
+            nunique = df[c].nunique(dropna=False)
+            if nunique < 0.7 * len(df):
+                df[c] = df[c].astype("category")
+                print(f"{c} to category")
+
+        df = df.sort_values([SPATIAL_VAR, TIME_VAR], kind="quicksort")
 
         self.df = df
 
