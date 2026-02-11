@@ -6,15 +6,24 @@ authors = [
     {name = "Florian Haus", email = "s4923399@stud.uni-frankfurt.de"}
 ]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0.0",
-    "torch>=2.0.0",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
     "numpy>=1.24.0",
     "tqdm>=4.65.0",
     "pyarrow>=12.0"
 ]
 
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = [
+    "setuptools>=65.5.0",
+    "wheel"
+]
 build-backend = "setuptools.build_meta"
