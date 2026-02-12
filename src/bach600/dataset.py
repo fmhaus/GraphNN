@@ -136,21 +136,27 @@ class MaskSet:
         self.mask_count = mask_count
 
         # Generate masks using random numbers
-        noise = torch.randn((mask_count, space_dim, time_dim), device=device, generator=torch.manual_seed(seed))
+        generator = torch.Generator(device)
+        generator.manual_seed(seed)
+        noise = torch.randn((mask_count, space_dim, time_dim), device=device, generator=generator)
         noise = noise.reshape(mask_count * space_dim, 1, time_dim)
 
         # Use smooth gaussian noise. The kernel size determines the smoothness (and length of outtages)
         kernel = torch.ones((1, 1, kernel_size), device=device) / kernel_size
-        smooth_noise = torch.nn.functional.conv1d(noise, kernel, padding='same')
-        smooth_noise = smooth_noise.reshape(mask_count, space_dim, time_dim)
+        noise = torch.nn.functional.conv1d(noise, kernel, padding='same')
+        noise = noise.reshape(mask_count, space_dim, time_dim)
 
         # Use quantile to get a threshold to match the expected unseen probability
         if global_threshold:
-            unseen_threshold = torch.quantile(smooth_noise, 1 - unseen_split)
-            self.mask_tensor = smooth_noise <= unseen_threshold
+            k = int((1 - unseen_split) * noise.numel())
+            unseen_threshold = torch.kthvalue(noise.flatten(), k).values
+            self.mask_tensor = noise <= unseen_threshold
         else:
-            unseen_threshold = torch.quantile(smooth_noise.flatten(1), 1 - unseen_split)
-            self.mask_tensor = smooth_noise <= unseen_threshold[:, None, None]
+            k = int((1 - unseen_split) * space_dim * time_dim)
+            unseen_threshold = torch.kthvalue(noise.flatten(1), k, dim=1).values
+            self.mask_tensor = noise <= unseen_threshold[:, None, None]
+        
+        self.mask_tensor.to(torch.device("cpu")) # Save on CPU and transfer only slices to GPU to save VRAM
     
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, features: GraphFeatures, masks: MaskSet, window_size: int):
@@ -161,7 +167,7 @@ class Dataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.masks.mask_count
 
-    def __item__(self, idx):
+    def __getitem__(self, idx):
         features = self.features.features_tensor
         mask = self.masks.mask_tensor[idx].to(self.features.features_tensor.device)
 
@@ -169,11 +175,15 @@ class Dataset(torch.utils.data.Dataset):
         H = self.window_size
         n_steps = T // H - 1
 
-        offset = torch.randint(0, T - H * n_steps, 1)
-        features_slice = features[:, H * n_steps + offset, :]
-        mask_slice = mask[:, H * n_steps + offset]
-
+        offset = torch.randint(0, T - H * n_steps, [1])
+        features_slice = features[:, offset:H * n_steps + offset, :]
+        mask_slice = mask[:, offset:H * n_steps + offset]
+        
         features_stacked = features_slice.reshape(N, n_steps, H, F).permute(1, 0, 2, 3)
-        mask_stacked = mask_slice.reshape(N, n_steps, H).reshape(1, 0, 2)
+        mask_stacked = mask_slice.reshape(N, n_steps, H).permute(1, 0, 2)
 
-        return features_stacked, mask_stacked.float()
+        return features_stacked, mask_stacked
+
+def concat_collate(batch):
+    f, m = zip(*batch)
+    return torch.cat(f, dim=0), torch.cat(m, dim=0)
