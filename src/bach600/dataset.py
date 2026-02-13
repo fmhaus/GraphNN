@@ -1,8 +1,9 @@
+from enum import Enum
+import os
+import math
 import pandas as pd
 import numpy as np
 import torch
-from enum import Enum
-import os
 
 class VariableType(Enum):
     NUMERICAL = 0
@@ -23,15 +24,29 @@ class Variable():
     
     def normalize(self, arr: np.ndarray):
         if self.norm == NormType.Z_SCORE:
-            return (arr - arr.mean()) / (arr.std() + 1e-8)
+            self.mean = arr.mean()
+            self.stdev = arr.std()
+            return (arr - self.mean) / (self.stdev + 1e-8)
         elif self.norm == NormType.LOG_1P_Z_SCORE:
             log1p = np.log1p(arr)
-            return (log1p - log1p.mean()) / (log1p.std() + 1e-8)
+            self.mean = log1p.mean()
+            self.stdev = log1p.std()
+            return (log1p - self.mean) / (self.stdev + 1e-8)
         elif self.norm == NormType.MIN_MAX:
-            low, high = arr.min(), arr.max()
-            return (arr - low) / (high - low + 1e-8)
+            self.low, self.high = arr.min(), arr.max()
+            return (arr - self.low) / (self.high - self.low + 1e-8)
         else:
             return arr
+    
+    def transform_error(self, error: float):
+        if self.norm == NormType.Z_SCORE:
+            return error * (self.stdev * 1e-8)
+        elif self.norm == NormType.LOG_1P_Z_SCORE:
+            return math.exp(error * (self.stdev * 1e-8))
+        elif self.norm == NormType.MIN_MAX:
+            return error * (self.high - self.low + 1e-8)
+        else:
+            return error
     
     def encode(self, df: pd.DataFrame):
         col = df[self.name]
@@ -113,14 +128,14 @@ class GraphFeatures():
         feature_slices = []
 
         if feature_options == FeatureOptions.TARGET_ONLY:
-            feature_vars = [
+            self.feature_vars = [
                 Variable("strava_total_trip_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE)
             ]
         else:
             raise ValueError("Invalid feature options")
 
         feature_slices = []
-        for var in feature_vars:
+        for var in self.feature_vars:
             feature_slices.append(var.encode(self.df))
 
         tensor = np.concatenate(feature_slices, axis=1)
@@ -129,6 +144,11 @@ class GraphFeatures():
         torch_tensor = torch.from_numpy(tensor.reshape(self.n_space, self.n_time, n_features))
         torch_tensor.to(device=device)
         self.features_tensor = torch_tensor
+    
+    def interpret_target_error(self, error):
+        target_var = self.feature_vars[0]
+        return target_var.transform_error(error)
+        
         
 class MaskSet:
     def __init__(self, mask_count: int, space_dim: int, time_dim: int, kernel_size: int, 

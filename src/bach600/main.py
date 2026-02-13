@@ -65,7 +65,9 @@ model = gnn.Model(
     gnn.GCNBlock(64, 1 * opt.window_size, graph)
 )
 model = model.to(device)
-model = torch.compile(model)
+
+if opt.compile:
+    model = torch.compile(model)
 
 loss_crit = torch.nn.L1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
@@ -73,12 +75,12 @@ optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode='min',
-    factor=0.5,
-    patience=2,
+    factor=0.75,
+    patience=3,
     min_lr=1e-6
 )
 
-early_stopping = utils.EarlyStopping(patience=10)
+early_stopping = utils.EarlyStopping(patience=10, min_delta=5e-4)
 
 for e in range(opt.max_epochs):
 
@@ -140,10 +142,12 @@ for e in range(opt.max_epochs):
     current_lr = optimizer.param_groups[0]['lr']
     logger.log_epoch(model, e, current_lr, avg_train_loss, avg_val_loss)
     
+    print(f"Average multiplicate error factor: {dataset.features.interpret_target_error(avg_val_loss)}")
+
     scheduler.step(avg_val_loss)
     
     if early_stopping(avg_val_loss):
         break
-
+        
 logger.save()
 print("Saved results.")
