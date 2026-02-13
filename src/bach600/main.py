@@ -11,7 +11,7 @@ from bach600 import config, dataset, gnn, utils, logging
 
 opt = config.get_config_options()
 
-use_cuda = torch.cuda.is_available() and opt.gpu
+use_cuda = torch.cuda.is_available() and not opt.no_cuda
 if use_cuda:
     print("CUDA enabled.")
 
@@ -40,16 +40,16 @@ os.environ["PYTHONHASHSEED"] = str(SEED)
 
 print("Loading dataset...")
 
-graph_features = dataset.GraphFeatures(opt.dataset_folder, device, dataset.FeatureOptions.TARGET_ONLY)
+graph_features = dataset.GraphFeatures(opt.dataset_folder, dataset.FeatureOptions.TARGET_ONLY)
 N, T, F = graph_features.features_tensor.shape  # nodes, times, features
 
 print("Creating training masks...")
 
 training_set = dataset.Dataset(graph_features, 
-                               dataset.MaskSet(opt.training_masks, N, T, opt.noise_kernel_size, opt.unseen_split, device, seed=420),
+                               dataset.MaskSet(opt.training_masks, N, T, opt.noise_kernel_size, opt.unseen_split, seed=420),
                                opt.window_size)
 validation_set = dataset.Dataset(graph_features, 
-                                 dataset.MaskSet(opt.validation_masks, N, T, opt.noise_kernel_size, opt.unseen_split, device, seed=69),
+                                 dataset.MaskSet(opt.validation_masks, N, T, opt.noise_kernel_size, opt.unseen_split, seed=69),
                                  opt.window_size)
 
 training_loader = DataLoader(training_set, opt.batch_size, shuffle=True, pin_memory=use_cuda, collate_fn=dataset.concat_collate)
@@ -68,6 +68,7 @@ model = model.to(device)
 
 if opt.compile:
     model = torch.compile(model)
+    print("Compiling model.")
 
 loss_crit = torch.nn.L1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
@@ -86,6 +87,8 @@ for e in range(opt.max_epochs):
 
     training_loss_sum = 0
     model.train()
+    
+    torch.cuda.empty_cache()
     
     for features, mask in tqdm(training_loader, f"Training epoch {e+1}"):
         
@@ -106,6 +109,12 @@ for e in range(opt.max_epochs):
         inverse_mask = 1 - mask
         model_output_masked = model_output * inverse_mask
         ground_truth_masked = ground_truth * inverse_mask
+        
+        assert model_output_masked.shape == ground_truth_masked.shape, f"{model_output_masked.shape} vs {ground_truth_masked.shape}"
+        assert model_output_masked.device == ground_truth_masked.device
+        assert model_output_masked.dtype == ground_truth_masked.dtype
+        assert not torch.isnan(model_output_masked).any()
+        assert not torch.isnan(ground_truth_masked).any()
         
         loss = loss_crit(model_output_masked, ground_truth_masked)
         training_loss_sum += loss.item()

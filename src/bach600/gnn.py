@@ -34,7 +34,7 @@ class GCNGraph:
         if not adjacency.is_sparse:
             adjacency = adjacency.to_sparse()
 
-        adjacency.to(device=device)
+        adjacency = adjacency.to(device=device)
 
         indices, values = adjacency.indices(), adjacency.values()
 
@@ -68,7 +68,10 @@ class GCNGraph:
         values = connections.values()
         values = deg_inv_sqrt[row] * values * deg_inv_sqrt[col]
 
-        self.normalized_adjacency = torch.sparse_coo_tensor(connections.indices(), values, (self.N, self.N)).coalesce()
+        self.normalized_adjacency = torch.sparse_coo_tensor(connections.indices(), 
+                                                            values, 
+                                                            (self.N, self.N), 
+                                                            device=connections.device).coalesce()
 
 class GCNLayer(nn.Module):
     def __init__(self, dim_in: int, dim_out: int, graph: GCNGraph , bias: bool = True):
@@ -93,6 +96,8 @@ class GCNLayer(nn.Module):
         assert x.shape[-1] == self.dim_in 
         assert x.shape[-2] == self.N
         is_batched = len(x.shape) == 3
+        
+        assert self.normalized_adjacency.device == x.device
         
         if is_batched:
             # Batched sparse mm is not supported, reshape for not sparse

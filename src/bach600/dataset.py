@@ -80,7 +80,7 @@ class FeatureOptions(Enum):
     TARGET_ONLY = 0
 
 class GraphFeatures():
-    def __init__(self, dataset_folder: str, device, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
+    def __init__(self, dataset_folder: str, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
         TIME_VAR = "date"
         SPATIAL_VAR = "counter_name"
 
@@ -142,7 +142,6 @@ class GraphFeatures():
         n_features = tensor.shape[1]
 
         torch_tensor = torch.from_numpy(tensor.reshape(self.n_space, self.n_time, n_features))
-        torch_tensor.to(device=device)
         self.features_tensor = torch_tensor
     
     def interpret_target_error(self, error):
@@ -152,8 +151,13 @@ class GraphFeatures():
         
 class MaskSet:
     def __init__(self, mask_count: int, space_dim: int, time_dim: int, kernel_size: int, 
-                 unseen_split: float, device: torch.device, seed: int, global_threshold: bool = False):
+                 unseen_split: float, seed: int, global_threshold: bool = False):
         self.mask_count = mask_count
+        
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
 
         # Generate masks using random numbers
         generator = torch.Generator(device)
