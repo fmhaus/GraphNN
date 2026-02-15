@@ -104,7 +104,8 @@ class GCNLayer(nn.Module):
             B, N, F = x.shape
             x = x.permute(1, 0, 2).reshape(N, B*F)
 
-        x = torch.sparse.mm(self.normalized_adjacency, x)
+        with torch.amp.autocast(x.device.type, enabled=False):
+            x = torch.sparse.mm(self.normalized_adjacency, x)
 
         if is_batched:
             x = x.reshape(N, B, F).permute(1, 0, 2)

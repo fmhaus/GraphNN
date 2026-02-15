@@ -31,36 +31,26 @@ class Logger:
         }
         
         self.best_state = None
-        self.best_val = float('inf')
-        
-        if OPEN_BAYES:
-            openbayestool.clear_metric("learning rate")
-            openbayestool.clear_metric("training loss")
-            openbayestool.clear_metric("validation loss")
-            openbayestool.clear_param("epoch")
+        self.best_loss = float('inf')
     
-    def log_epoch(self, model, index: int, learning_rate: float, train_loss: float, val_loss: float):
-        self.data["epochs"].append({
-            "index": index,
-            "learning_rate": learning_rate,
-            "train_loss": train_loss,
-            "val_loss": val_loss
-        })
+    def log_epoch(self, model, index: int, loss: float, parameters):
+        self.data["epochs"].append({"index": index} | parameters)
         self.data["last_epoch"] = index
         
-        if val_loss < self.best_val:
-            self.best_val = val_loss
+        if loss < self.best_loss:
+            self.best_loss = loss
             self.best_state = model.state_dict()
             self.data["best_epoch"] = index
         
         if self.print_epoch_metrics:
-            print(f"Epoch {index+1} completed. Training loss: {train_loss}. Validation loss: {val_loss}. LR: {learning_rate}")
+            print(f"Epoch {index+1} completed: {parameters}")
         
-        if OPEN_BAYES:
-            openbayestool.log_metric("learning rate", learning_rate)
-            openbayestool.log_metric("training loss", train_loss)
-            openbayestool.log_metric("validation loss", val_loss)
-            openbayestool.log_param("epoch", index+1)
+        if OPEN_BAYES:        
+            for k, v in parameters.items():
+                if index == 0:
+                    openbayestool.clear_metric(k)
+                
+                openbayestool.log_metric(k, v)
     
     def save(self):
         with open(os.path.join(self.folder, self.name + ".json"), "w") as fr:

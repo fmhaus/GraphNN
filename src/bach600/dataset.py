@@ -48,17 +48,18 @@ class Variable():
         else:
             return error
     
-    def encode(self, df: pd.DataFrame):
+    def encode(self, df: pd.DataFrame, store_half: bool):
         col = df[self.name]
+        
+        dtype = np.float16 if store_half else np.float32
 
         if self.type == VariableType.NUMERICAL:
-            # convert to float32 and normalize
             arr = col.to_numpy(dtype = np.float32)
-            arr = self.normalize(arr)
+            arr = self.normalize(arr).astype(dtype)
             return arr[:, None]
         elif self.type == VariableType.BINARY:
             # represent True as 1 and False as 0
-            arr = col.astype(bool).astype(np.float32).to_numpy()
+            arr = col.astype(bool).astype(dtype).to_numpy()
             return arr[:, None]
         elif self.type == VariableType.CATEGORICAL:
             cat = col.astype("category")
@@ -67,7 +68,7 @@ class Variable():
             n_cat = len(cat.cat.categories)
 
             # allocate one hot array for all unique categories
-            one_hot = np.zeros((len(col), n_cat), dtype=np.float32)
+            one_hot = np.zeros((len(col), n_cat), dtype=dtype)
 
             # only assign to valid (not NaN) rows
             valid_bitmap = codes >= 0
@@ -80,7 +81,7 @@ class FeatureOptions(Enum):
     TARGET_ONLY = 0
 
 class GraphFeatures():
-    def __init__(self, dataset_folder: str, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY):
+    def __init__(self, dataset_folder: str, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY, store_half: bool = False):
         TIME_VAR = "date"
         SPATIAL_VAR = "counter_name"
 
@@ -136,7 +137,7 @@ class GraphFeatures():
 
         feature_slices = []
         for var in self.feature_vars:
-            feature_slices.append(var.encode(self.df))
+            feature_slices.append(var.encode(self.df, store_half))
 
         tensor = np.concatenate(feature_slices, axis=1)
         n_features = tensor.shape[1]
@@ -144,9 +145,9 @@ class GraphFeatures():
         torch_tensor = torch.from_numpy(tensor.reshape(self.n_space, self.n_time, n_features))
         self.features_tensor = torch_tensor
     
-    def interpret_target_error(self, error):
+    def get_multiplicative_error(self, mae):
         target_var = self.feature_vars[0]
-        return target_var.transform_error(error)
+        return target_var.transform_error(mae)
         
         
 class MaskSet:

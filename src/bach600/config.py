@@ -5,10 +5,11 @@ def get_config_options():
 
     # train parameters
     parser.add_argument('--max_epochs', type=int, default=1000, help='The maximum number of epochs to train for')
-    parser.add_argument('--initial_lr', type=float, default=5e-3, help='Initial learning rate')
-    parser.add_argument('--no_cuda', action='store_true', default=False, help='Whether to not use gpu acceleration')
+    parser.add_argument('--initial_lr', type=float, default=3e-2, help='Initial learning rate')
     parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training')
-    parser.add_argument('--compile', action='store_true', default=False, help='Whether to compile the model')
+    parser.add_argument('--no_cuda', action='store_true', default=False, help='Whether to not use gpu acceleration')
+    parser.add_argument('--no_compile', action='store_true', default=False, help='Whether to compile the model')
+    parser.add_argument('--mixed_precision', action='store_true', default=False, help='Use mixed precision instead of float32')
     
     parser.add_argument('--training_masks', type=int, default=402, help='The amount of unique masks for training')
     parser.add_argument('--validation_masks', type=int, default=30, help='The amount of unique masks for validation')
