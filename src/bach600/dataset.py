@@ -40,9 +40,9 @@ class Variable():
     
     def transform_error(self, error: float):
         if self.norm == NormType.Z_SCORE:
-            return error * (self.stdev * 1e-8)
+            return error * (self.stdev + 1e-8)
         elif self.norm == NormType.LOG_1P_Z_SCORE:
-            return math.exp(error * (self.stdev * 1e-8))
+            return math.exp(error * (self.stdev + 1e-8))
         elif self.norm == NormType.MIN_MAX:
             return error * (self.high - self.low + 1e-8)
         else:
@@ -94,7 +94,8 @@ class FeatureOptions(Enum):
 
 
 class GraphFeatures():
-    def __init__(self, dataset_folder: str, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY, store_half: bool = False):
+    def __init__(self, dataset_folder: str, feature_options: FeatureOptions = FeatureOptions.TARGET_ONLY, 
+                 device: torch.device = torch.device('cpu'), store_half: bool = False):
         TIME_VAR = "date"
         SPATIAL_VAR = "counter_name"
 
@@ -343,8 +344,7 @@ class GraphFeatures():
         tensor = np.concatenate(feature_slices, axis=1)
         n_features = tensor.shape[1]
 
-        torch_tensor = torch.from_numpy(tensor.reshape(self.n_space, self.n_time, n_features))
-        self.features_tensor = torch_tensor
+        self.features_tensor = torch.from_numpy(tensor.reshape(self.n_space, self.n_time, n_features)).to(device=device)
     
     def get_multiplicative_error(self, mae):
         target_var = self.feature_vars[0]
@@ -353,10 +353,11 @@ class GraphFeatures():
         
 class MaskSet:
     def __init__(self, mask_count: int, space_dim: int, time_dim: int, kernel_size: int, 
-                 unseen_split: float, seed: int, global_threshold: bool = False):
+                 unseen_split: float, device: torch.device, seed: int, global_threshold: bool = False):
         self.mask_count = mask_count
         
         if torch.cuda.is_available():
+            # Use cuda if available to create masks
             device = torch.device("cuda")
         else:
             device = torch.device("cpu")
@@ -376,13 +377,13 @@ class MaskSet:
         if global_threshold:
             k = int((1 - unseen_split) * noise.numel())
             unseen_threshold = torch.kthvalue(noise.flatten(), k).values
-            self.mask_tensor = noise <= unseen_threshold
+            mask_tensor = noise <= unseen_threshold
         else:
             k = int((1 - unseen_split) * space_dim * time_dim)
             unseen_threshold = torch.kthvalue(noise.flatten(1), k, dim=1).values
-            self.mask_tensor = noise <= unseen_threshold[:, None, None]
+            mask_tensor = noise <= unseen_threshold[:, None, None]
         
-        self.mask_tensor.to(torch.device("cpu")) # Save on CPU and transfer only slices to GPU to save VRAM
+        self.mask_tensor = mask_tensor.to(device)
     
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, features: GraphFeatures, masks: MaskSet, window_size: int, batch_size: int):
@@ -392,17 +393,18 @@ class Dataset(torch.utils.data.Dataset):
         self.batch_size = batch_size
         
         T = features.features_tensor.shape[1]
-        self.windows_per_mask = T // window_size - 1 # subtract one to increase offset variability
+        self.windows_per_mask = T // window_size - 1
         self.max_offset = T - self.windows_per_mask * window_size
         self.total_windows = self.windows_per_mask * self.masks.mask_count
-        self.batch_count = -(-self.total_windows // batch_size)     # round up division; last batch might have less windows
+        self.batch_count = -(-self.total_windows // batch_size)
 
-        assert batch_size <= self.windows_per_mask
+        if batch_size > self.windows_per_mask:
+            raise ValueError(f"Batch size ({batch_size}) can not be bigger than {self.windows_per_mask}")
 
         self.reshuffle_offsets()
 
     def reshuffle_offsets(self):
-        self.window_offsets = torch.randint(0, self.max_offset, self.masks.mask_count)
+        self.window_offsets = torch.randint(0, self.max_offset, (self.masks.mask_count,))
 
     def __len__(self):
         return self.batch_count
@@ -446,5 +448,5 @@ class Dataset(torch.utils.data.Dataset):
 
         features_stacked = features.reshape(N, actual_batch_size, self.window_size, F).permute(1, 0, 2, 3)
         mask_stacked = mask.reshape(N, actual_batch_size, self.window_size).permute(1, 0, 2)
-
+        
         return features_stacked, mask_stacked

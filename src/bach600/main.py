@@ -12,12 +12,15 @@ from bach600 import config, dataset, gnn, utils, logging, loss
 # Config
 
 opt = config.get_config_options()
+print(opt)
 
 use_cuda = torch.cuda.is_available() and not opt.no_cuda
 if use_cuda:
     print("CUDA enabled.")
 
 device = torch.device("cuda") if use_cuda else torch.device("cpu")
+
+dataset_device = torch.device("cpu") if opt.dataset_main_memory else device
 
 if opt.name is None:
     raise RuntimeError('Session name missing (--name) in config.')
@@ -59,20 +62,24 @@ elif opt.detail == 'features_full':
 else:
     assert False
 
-graph_features = dataset.GraphFeatures(opt.dataset_folder, detail_option, store_half=True)
+graph_features = dataset.GraphFeatures(opt.dataset_folder, detail_option, device=dataset_device, store_half=True)
 N, T, F = graph_features.features_tensor.shape  # nodes, times, features
 
 print("Creating training masks...")
 
 training_set = dataset.Dataset(graph_features, 
-                               dataset.MaskSet(opt.training_masks, N, T, opt.noise_kernel_size, opt.unseen_split, seed=420),
+                               dataset.MaskSet(opt.training_masks, N, T, opt.noise_kernel_size, opt.unseen_split, device=dataset_device, seed=420),
                                opt.window_size, opt.batch_size)
 validation_set = dataset.Dataset(graph_features, 
-                                 dataset.MaskSet(opt.validation_masks, N, T, opt.noise_kernel_size, opt.unseen_split, seed=69),
+                                 dataset.MaskSet(opt.validation_masks, N, T, opt.noise_kernel_size, opt.unseen_split, device=dataset_device, seed=69),
                                  opt.window_size, opt.batch_size)
 
-training_loader = DataLoader(training_set, shuffle=True, pin_memory=use_cuda)
-validation_loader = DataLoader(validation_set, shuffle=False, pin_memory=use_cuda)
+pin_memory = opt.dataset_main_memory and use_cuda
+training_loader = DataLoader(training_set, batch_size=None, shuffle=True, pin_memory=pin_memory)
+validation_loader = DataLoader(validation_set, batch_size=None, shuffle=False, pin_memory=pin_memory)
+
+if use_cuda:
+    torch.cuda.empty_cache()
 
 # Model
 
@@ -107,35 +114,33 @@ early_stopping = utils.EarlyStopping(patience=10, min_delta=1e-4)
 
 start_time = time.time()
 
+
+training_losses = torch.empty(len(training_loader), device=dataset_device)
+validation_losses = torch.empty(len(validation_loader), device=dataset_device)    
+
 for e in range(opt.max_epochs):
 
     training_set.reshuffle_offsets()
 
-    training_loss_sum = 0
     model.train()
     optimizer.zero_grad()
-
+    
     for i, (features, unseen_mask) in enumerate(tqdm(training_loader, f"Training epoch {e+1}")):
 
         with amp.autocast(device.type, enabled=use_mixed_precision):
-            if features.device == device:
-                features = features.clone()
-            else:
-                features = features.to(device=device, non_blocking=True)
-            
+            features = features.to(device=device, non_blocking=True)
             unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
-
-            # Mask target and concat mask to features
-            ground_truth = features[:, :, :, 0].clone()
-            features[:, :, :, 0] *= unseen_mask
-
+            
+            # add mask to model input
             features_all = torch.cat((unseen_mask.unsqueeze(-1), features), dim=-1)
-
+            # mask target input variable
+            features_all[:, :, :, 1] *= unseen_mask
+            
             model_output = model(features_all)
-
-            seen_mask = 1 - unseen_mask
-            loss = loss_crit(model_output, ground_truth, seen_mask)
-            training_loss_sum += loss.item()
+            
+            loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
+            
+            training_losses[i] = loss
             loss = loss / accumulate_steps
 
         scaler.scale(loss).backward()
@@ -145,31 +150,25 @@ for e in range(opt.max_epochs):
             scaler.update()
             optimizer.zero_grad()
 
-    validation_loss_sum = 0
     model.eval()
 
     with torch.no_grad():
 
-        for features, unseen_mask in tqdm(validation_loader, f"Validating epoch {e+1}"):
-            if features.device == device:
-                features = features.clone()
-            else:
-                features = features.to(device=device, non_blocking=True)
+        for i, (features, unseen_mask) in enumerate(tqdm(validation_loader, f"Validating epoch {e+1}")):
+            features = features.to(device=device, non_blocking=True)
+            unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
             
-            unseen_mask = unseen_mask.to(device=device, dtype=torch.float, non_blocking=True)
-            
-            ground_truth = features[:, :, :, 0].clone()
-            features[:, :, :, 0] *= unseen_mask
             features_all = torch.cat((unseen_mask.unsqueeze(-1), features), dim=-1)
-
+            features_all[:, :, :, 1] *= unseen_mask
+            
             model_output = model(features_all)
             
-            seen_mask = 1 - unseen_mask
-            loss = loss_crit(model_output, ground_truth, seen_mask)
-            validation_loss_sum += loss.item()
+            loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
+            
+            validation_losses[i] = loss
 
-    avg_train_loss = training_loss_sum / len(training_loader)
-    avg_val_loss = validation_loss_sum / len(validation_loader)
+    avg_train_loss = training_losses.mean().item()
+    avg_val_loss = validation_losses.mean().item()
 
     current_lr = optimizer.param_groups[0]['lr']
     logger.log_epoch(model, e, avg_val_loss, {
