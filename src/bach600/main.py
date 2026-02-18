@@ -31,6 +31,10 @@ if use_mixed_precision:
 
 logger = logging.Logger(opt, print_epoch_metrics=True)
 
+if opt.effective_batch_size % opt.batch_size != 0:
+    raise ValueError("Effective batch size must be a multiple of batch size.")
+accumulate_steps = opt.effective_batch_size // opt.batch_size
+
 # Reproducability
 
 SEED = 42
@@ -46,20 +50,29 @@ os.environ["PYTHONHASHSEED"] = str(SEED)
 
 print("Loading dataset...")
 
-graph_features = dataset.GraphFeatures(opt.dataset_folder, dataset.FeatureOptions.TARGET_ONLY, store_half=True)
+if opt.detail == 'target_only':
+    detail_option = dataset.FeatureOptions.TARGET_ONLY
+elif opt.detail == 'features_minimal':
+    detail_option = dataset.FeatureOptions.FEATURES_MINIMAL
+elif opt.detail == 'features_full':
+    detail_option = dataset.FeatureOptions.FEATURES_FULL
+else:
+    assert False
+
+graph_features = dataset.GraphFeatures(opt.dataset_folder, detail_option, store_half=True)
 N, T, F = graph_features.features_tensor.shape  # nodes, times, features
 
 print("Creating training masks...")
 
 training_set = dataset.Dataset(graph_features, 
                                dataset.MaskSet(opt.training_masks, N, T, opt.noise_kernel_size, opt.unseen_split, seed=420),
-                               opt.window_size)
+                               opt.window_size, opt.batch_size)
 validation_set = dataset.Dataset(graph_features, 
                                  dataset.MaskSet(opt.validation_masks, N, T, opt.noise_kernel_size, opt.unseen_split, seed=69),
-                                 opt.window_size)
+                                 opt.window_size, opt.batch_size)
 
-training_loader = DataLoader(training_set, opt.batch_size, shuffle=True, pin_memory=use_cuda, collate_fn=dataset.concat_collate)
-validation_loader = DataLoader(validation_set, opt.batch_size, shuffle=False, pin_memory=use_cuda, collate_fn=dataset.concat_collate)
+training_loader = DataLoader(training_set, shuffle=True, pin_memory=use_cuda)
+validation_loader = DataLoader(validation_set, shuffle=False, pin_memory=use_cuda)
 
 # Model
 
@@ -67,7 +80,7 @@ graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
 
 model = gnn.Model(
     gnn.GCNBlock((F+1) * opt.window_size, 64, graph),
-    gnn.GCNBlock(64, 64, graph),
+    gnn.GCNBlock(64, 64, graph, residuals=True),
     gnn.GCNBlock(64, 1 * opt.window_size, graph)
 )
 model = model.to(device)
@@ -96,12 +109,13 @@ start_time = time.time()
 
 for e in range(opt.max_epochs):
 
+    training_set.reshuffle_offsets()
+
     training_loss_sum = 0
     model.train()
-    
-    for features, unseen_mask in tqdm(training_loader, f"Training epoch {e+1}"):
-        
-        optimizer.zero_grad()
+    optimizer.zero_grad()
+
+    for i, (features, unseen_mask) in enumerate(tqdm(training_loader, f"Training epoch {e+1}")):
 
         with amp.autocast(device.type, enabled=use_mixed_precision):
             if features.device == device:
@@ -122,10 +136,14 @@ for e in range(opt.max_epochs):
             seen_mask = 1 - unseen_mask
             loss = loss_crit(model_output, ground_truth, seen_mask)
             training_loss_sum += loss.item()
+            loss = loss / accumulate_steps
 
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+
+        if (i+1) % accumulate_steps == 0 or (i+1) == len(training_loader):
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
     validation_loss_sum = 0
     model.eval()
