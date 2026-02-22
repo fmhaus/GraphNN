@@ -6,8 +6,13 @@ def get_config_options():
     # train parameters
     parser.add_argument('--max_epochs', type=int, default=1000, help='The maximum number of epochs to train for')
     parser.add_argument('--initial_lr', type=float, default=3e-2, help='Initial learning rate')
+<<<<<<< HEAD
     parser.add_argument('--batch_size', type=int, default=182, help='Batch size for training')
     parser.add_argument('--effective_batch_size', type=int, default=182, help='Batch size before updating gradients')
+=======
+    parser.add_argument('--batch_size', type=int, default=181, help='Batch size for training')
+    parser.add_argument('--effective_batch_size', type=int, default=181, help='Batch size before updating gradients')
+>>>>>>> 54eb8d8ecd7307b5b7045859c12f424c9eefe072
     parser.add_argument('--no_cuda', action='store_true', default=False, help='Whether to not use gpu acceleration')
     parser.add_argument('--no_compile', action='store_true', default=False, help='Whether to compile the model')
     parser.add_argument('--mixed_precision', action='store_true', default=False, help='Use mixed precision instead of float32')
