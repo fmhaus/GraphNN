@@ -6,14 +6,15 @@ def get_config_options():
     # train parameters
     parser.add_argument('--max_epochs', type=int, default=1000, help='The maximum number of epochs to train for')
     parser.add_argument('--initial_lr', type=float, default=3e-2, help='Initial learning rate')
-    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training')
-    parser.add_argument('--effective_batch_size', type=int, default=32, help='Batch size before updating gradients')
+    parser.add_argument('--batch_size', type=int, default=182, help='Batch size for training')
+    parser.add_argument('--effective_batch_size', type=int, default=182, help='Batch size before updating gradients')
     parser.add_argument('--no_cuda', action='store_true', default=False, help='Whether to not use gpu acceleration')
     parser.add_argument('--no_compile', action='store_true', default=False, help='Whether to compile the model')
     parser.add_argument('--mixed_precision', action='store_true', default=False, help='Use mixed precision instead of float32')
+    parser.add_argument('--dataset_main_memory', action='store_true', default=False, help='Whether to save the dataset in main memory or vram')
     
     parser.add_argument('--detail', choices=['target_only', 'features_minimal', 'features_full'], default='target_only', help='Target choice')
-    parser.add_argument('--training_masks', type=int, default=402, help='The amount of unique masks for training')
+    parser.add_argument('--training_masks', type=int, default=400, help='The amount of unique masks for training')
     parser.add_argument('--validation_masks', type=int, default=30, help='The amount of unique masks for validation')
     parser.add_argument('--window_size', type=int, default=10, help='Temporal window size')
     parser.add_argument('--unseen_split', type=float, default=0.1, help='The split of seen/unseen sensors')

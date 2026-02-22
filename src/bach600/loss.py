@@ -7,4 +7,4 @@ class MaskedMAE(nn.Module):
 
     def forward(self, output: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         masked_error = torch.abs(output - target) * mask
-        return masked_error.sum() / mask.sum().clamp(min=1e-8)
+        return masked_error.sum() / mask.sum(dtype=torch.float32).clamp(min=1e-8)
