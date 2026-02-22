@@ -355,11 +355,7 @@ class MaskSet:
         
         if torch.cuda.is_available():
             # Use cuda if available to create masks
-<<<<<<< HEAD
             work_device = torch.device("cuda")
-=======
-            device = torch.device("cuda")
->>>>>>> 54eb8d8ecd7307b5b7045859c12f424c9eefe072
         else:
             work_device = torch.device("cpu")
 
@@ -394,11 +390,7 @@ class Dataset(torch.utils.data.Dataset):
         self.batch_size = batch_size
         
         T = features.features_tensor.shape[1]
-<<<<<<< HEAD
         self.windows_per_mask = T // window_size
-=======
-        self.windows_per_mask = T // window_size - 1
->>>>>>> 54eb8d8ecd7307b5b7045859c12f424c9eefe072
         self.max_offset = T - self.windows_per_mask * window_size
         self.total_windows = self.windows_per_mask * self.masks.mask_count
         self.batch_count = -(-self.total_windows // batch_size)
