@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 import torch
 
 try:
@@ -18,16 +19,8 @@ class Logger:
             "epochs": [],
             "last_epoch": -1,
             "best_epoch": -1,
-            "options": {
-                "max_epochs": opt.max_epochs,
-                "initial_lr": opt.initial_lr,
-                "batch_size": opt.batch_size,
-                "training_masks": opt.training_masks,
-                "validation_masks": opt.validation_masks,
-                "window_size": opt.window_size,
-                "unseen_split": opt.unseen_split,
-                "noise_kernel_size": opt.noise_kernel_size
-            }
+            "options": vars(opt),
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
         self.best_state = None

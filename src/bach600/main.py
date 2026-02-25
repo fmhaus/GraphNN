@@ -85,10 +85,14 @@ if use_cuda:
 
 graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
 
+hidden_dim = 64
+
 model = gnn.Model(
-    gnn.GCNBlock((F+1) * opt.window_size, 64, graph, norm=None),
-    gnn.GCNBlock(64, 64, graph, residuals=True),
-    gnn.GCNBlock(64, 1 * opt.window_size, graph)
+    gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, graph, pre_norm = False, norm="batch"),
+    gnn.GCNBlock(hidden_dim, hidden_dim, graph, residuals=True, pre_norm = False, norm="batch"),
+    gnn.GCNBlock(hidden_dim, hidden_dim, graph, residuals=True, pre_norm = False, norm="batch"),
+    gnn.GCNBlock(hidden_dim, hidden_dim, graph, residuals=True, pre_norm = False, norm="batch"),
+    gnn.GCNBlock(hidden_dim, 1 * opt.window_size, graph, pre_norm = False, norm="batch")
 )
 model = model.to(device)
 
@@ -105,18 +109,19 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode='min',
     factor=0.5,
-    patience=3,
+    patience=5,
     min_lr=1e-5,
-    threshold=1e-4
+    threshold=1e-3
 )
 
-early_stopping = utils.EarlyStopping(patience=10, min_delta=1e-4)
+early_stopping = utils.EarlyStopping(patience=10, min_delta=1e-3)
 
 start_time = time.time()
 
-
 training_losses = torch.empty(len(training_loader), device=dataset_device)
-validation_losses = torch.empty(len(validation_loader), device=dataset_device)    
+validation_losses = torch.empty(len(validation_loader), device=dataset_device)
+validation_error_abs = torch.empty(len(validation_loader), device=dataset_device)
+
 
 for e in range(opt.max_epochs):
 
@@ -127,9 +132,10 @@ for e in range(opt.max_epochs):
     
     for i, (features, unseen_mask) in enumerate(tqdm(training_loader, f"Training epoch {e+1}")):
 
+        features = features.to(device=device, non_blocking=True)
+        unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
+        
         with amp.autocast(device.type, enabled=use_mixed_precision):
-            features = features.to(device=device, non_blocking=True)
-            unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
             
             # add mask to model input
             features_all = torch.cat((unseen_mask.unsqueeze(-1), features), dim=-1)
@@ -140,7 +146,7 @@ for e in range(opt.max_epochs):
             
             loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
             
-            training_losses[i] = loss
+            training_losses[i] = loss.detach()
             loss = loss / accumulate_steps
 
         scaler.scale(loss).backward()
@@ -165,17 +171,24 @@ for e in range(opt.max_epochs):
             
             loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
             
-            validation_losses[i] = loss
+            validation_losses[i] = loss.detach()
+            
+            predicted_target = graph_features.feature_vars[0].apply_denorm(model_output)
+            actual_target = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0])
+            
+            validation_error_abs[i] = loss_crit(predicted_target, actual_target, 1 - unseen_mask).detach()
+            
 
     avg_train_loss = training_losses.mean().item()
     avg_val_loss = validation_losses.mean().item()
-
+    avg_error_abs = validation_error_abs.mean().item()
+    
     current_lr = optimizer.param_groups[0]['lr']
     logger.log_epoch(model, e, avg_val_loss, {
         'learning_rate': current_lr, 
         'average_training_loss': avg_train_loss, 
-        'average_validation_loss': avg_val_loss, 
-        'average_multiplicative_error': graph_features.get_multiplicative_error(avg_val_loss)
+        'average_validation_loss': avg_val_loss,
+        'average_absolute_error': avg_error_abs
     })
 
     scheduler.step(avg_val_loss)

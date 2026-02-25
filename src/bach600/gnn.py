@@ -2,11 +2,20 @@ import torch
 import torch.nn as nn
 from typing import Literal
 
+class BatchNorm1dND(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.norm = nn.BatchNorm1d(dim)
+    
+    def forward(self, x):
+        B, N, F = x.shape
+        return self.norm(x.view(B * N, F)).view(B, N, F)
+
 def _get_norm(norm : Literal["layer", "batch"] | None, dim: int):
     if norm == "layer":
         return nn.LayerNorm(dim)
     elif norm == "batch":
-        return nn.BatchNorm1d(dim)
+        return BatchNorm1dND(dim)
     else:
         return nn.Identity()
 
@@ -121,6 +130,7 @@ class GCNLayer(nn.Module):
 class GCNBlock(nn.Module):
     def __init__(self, dim_in: int, dim_out: int, graph: GCNGraph, bias: bool = True,
                   norm : Literal["layer", "batch"] | None = "layer",
+                  pre_norm: bool = True,
                   dropout: float | None = 0.0, 
                   activation : Literal["gelu", "relu"] | None = "gelu", 
                   residuals : bool = False):
@@ -130,22 +140,28 @@ class GCNBlock(nn.Module):
         assert not residuals or dim_in == dim_out # can only use residuals with matching in out
 
         self.gcn_layer = GCNLayer(dim_in, dim_out, graph, bias)
-        self.norm = _get_norm(norm, dim_in)
+        self.norm = _get_norm(norm, dim_in if pre_norm else dim_out)
+        self.pre_norm = pre_norm
         self.activation = _get_activation(activation)
         self.dropout = _get_dropout(dropout)
         self.residuals = residuals
     
     def forward(self, x):
-        if self.residuals:
-            return x + self.get_block_output(x)
-        else:
-            return self.get_block_output(x)
-    
-    def get_block_output(self, x):
-        x = self.norm(x)
+        x_in = x
+        
+        if self.pre_norm:
+            x = self.norm(x)
+            
         x = self.gcn_layer(x)
         x = self.activation(x)
         x = self.dropout(x)
+        
+        if self.residuals:
+            x = x_in + x
+        
+        if not self.pre_norm:
+            x = self.norm(x)
+            
         return x
 
 class TransformerGraph:
