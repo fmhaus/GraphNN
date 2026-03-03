@@ -81,10 +81,16 @@ class Variable():
         Denormalize arbitrary (B, N, T) or (N, T) tensor using stored stats.
         """
         if self.norm == NormType.Z_SCORE:
+            self.stdev = self.stdev.to(tensor.device)
+            self.mean = self.mean.to(tensor.device)
             return tensor * (self.stdev + 1e-8) + self.mean
         elif self.norm == NormType.LOG_1P_Z_SCORE:
+            self.stdev = self.stdev.to(tensor.device)
+            self.mean = self.mean.to(tensor.device)
             return torch.expm1(tensor * (self.stdev + 1e-8) + self.mean)
         elif self.norm == NormType.MIN_MAX:
+            self.low = self.low.to(tensor.device)
+            self.high = self.high.to(tensor.device)
             return tensor * (self.high - self.low + 1e-8) + self.low
         else:
             return tensor
