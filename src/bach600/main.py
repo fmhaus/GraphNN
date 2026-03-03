@@ -85,7 +85,7 @@ if use_cuda:
 
 graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
 
-hidden_dim = 64
+hidden_dim = 128
 
 model = gnn.Model(
     gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, graph, pre_norm = False, norm="batch"),
@@ -100,7 +100,9 @@ if not opt.no_compile:
     model = torch.compile(model)
     print("Compiling model.")
 
-loss_crit = loss.MaskedMAE()
+loss_crit = loss.MaskedHuberLoss()
+eval_crit = loss.SMAPEMeter()
+
 optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
 
 scaler = amp.GradScaler(enabled=use_mixed_precision)
@@ -120,7 +122,6 @@ start_time = time.time()
 
 training_losses = torch.empty(len(training_loader), device=dataset_device)
 validation_losses = torch.empty(len(validation_loader), device=dataset_device)
-validation_error_abs = torch.empty(len(validation_loader), device=dataset_device)
 
 
 for e in range(opt.max_epochs):
@@ -157,7 +158,8 @@ for e in range(opt.max_epochs):
             optimizer.zero_grad()
 
     model.eval()
-
+    eval_crit.reset()
+    
     with torch.no_grad():
 
         for i, (features, unseen_mask) in enumerate(tqdm(validation_loader, f"Validating epoch {e+1}")):
@@ -173,22 +175,22 @@ for e in range(opt.max_epochs):
             
             validation_losses[i] = loss.detach()
             
-            predicted_target = graph_features.feature_vars[0].apply_denorm(model_output)
-            actual_target = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0])
+            predicted_target = graph_features.feature_vars[0].apply_denorm(model_output.float())
+            actual_target = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0].float())
             
-            validation_error_abs[i] = loss_crit(predicted_target, actual_target, 1 - unseen_mask).detach()
+            eval_crit.update(predicted_target, actual_target, 1 - unseen_mask)
             
 
     avg_train_loss = training_losses.mean().item()
     avg_val_loss = validation_losses.mean().item()
-    avg_error_abs = validation_error_abs.mean().item()
+    avg_validation_smape = eval_crit.compute()
     
     current_lr = optimizer.param_groups[0]['lr']
     logger.log_epoch(model, e, avg_val_loss, {
         'learning_rate': current_lr, 
         'average_training_loss': avg_train_loss, 
         'average_validation_loss': avg_val_loss,
-        'average_absolute_error': avg_error_abs
+        'percentage_error': avg_validation_smape
     })
 
     scheduler.step(avg_val_loss)
