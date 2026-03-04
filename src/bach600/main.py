@@ -171,9 +171,8 @@ for e in range(opt.max_epochs):
             features_all[:, :, :, 1] *= unseen_mask
 
             model_output = model(features_all)
-            mu_raw, r_raw, pi_raw = model_output.unbind(dim=-1)
 
-            loss = loss_crit(mu_raw, r_raw, pi_raw, target_counts, 1 - unseen_mask)
+            loss = loss_crit(model_output, target_counts, 1 - unseen_mask)
 
             training_losses[i] = loss.detach()
             loss = loss / accumulate_steps
@@ -198,15 +197,13 @@ for e in range(opt.max_epochs):
             features_all[:, :, :, 1] *= unseen_mask
             
             model_output = model(features_all)
-            mu_raw, r_raw, pi_raw = model_output.unbind(dim=-1)
 
             actual_target = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0].float())
-            loss = loss_crit(mu_raw, r_raw, pi_raw, actual_target, 1 - unseen_mask)
+            loss = loss_crit(model_output, actual_target, 1 - unseen_mask)
 
             validation_losses[i] = loss.detach()
 
-            predicted_target = torch.nn.functional.softplus(mu_raw.float())
-            eval_crit.update(predicted_target, actual_target, 1 - unseen_mask)
+            eval_crit.update(model_output, actual_target, 1 - unseen_mask)
             
 
     avg_train_loss = training_losses.mean().item()

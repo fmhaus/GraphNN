@@ -26,10 +26,10 @@ class MaskedZINBLoss(nn.Module):
     """
     Masked Zero-Inflated Negative Binomial negative log-likelihood for count data.
 
-    Expects raw (pre-activation) model outputs; activations are applied internally:
-        mu_raw  → softplus  → NB mean μ > 0
-        r_raw   → softplus  → NB dispersion r > 0
-        pi_raw  → sigmoid   → zero-inflation probability π ∈ (0, 1)
+    Expects raw model_output [B, N, H, 3]; activations are applied internally:
+        [..., 0]  mu_raw  → softplus  → NB mean μ > 0
+        [..., 1]  r_raw   → softplus  → NB dispersion r > 0
+        [..., 2]  pi_raw  → sigmoid   → zero-inflation probability π ∈ (0, 1)
 
     NB parameterisation: P(Y=k | μ, r) ∝ Γ(r+k)/Γ(r) · (r/(r+μ))^r · (μ/(r+μ))^k
 
@@ -44,15 +44,14 @@ class MaskedZINBLoss(nn.Module):
 
     def forward(
         self,
-        mu_raw: torch.Tensor,
-        r_raw: torch.Tensor,
-        pi_raw: torch.Tensor,
+        model_output: torch.Tensor,
         target: torch.Tensor,
         mask: torch.Tensor,
     ) -> torch.Tensor:
-        mu = F.softplus(mu_raw)
-        r  = F.softplus(r_raw)
-        pi = torch.sigmoid(pi_raw)
+        mu_raw, r_raw, pi_raw = model_output.unbind(dim=-1)
+        mu = F.softplus(mu_raw.float())
+        r  = F.softplus(r_raw.float())
+        pi = torch.sigmoid(pi_raw.float())
 
         log_r         = torch.log(r + self.eps)
         log_mu        = torch.log(mu + self.eps)
@@ -81,70 +80,101 @@ class MaskedZINBLoss(nn.Module):
 
 class EvalMeter:
     """
-    Accumulates predictions and targets (denormalized, masked) across batches
-    and computes MAE, RMSE, KL divergence, zero-class P/R/F1, and NLL.
+    Accumulates ZINB parameters and targets (raw counts, masked) across batches
+    and computes MAE, RMSE, KL divergence, zero-class P/R/F1, and ZINB NLL.
 
-    KL is computed analytically between fitted Gaussians: KL(pred || target).
-    NLL assumes a Gaussian with MLE variance (= MSE), giving: 0.5*(log(2π·MSE) + 1).
-    Zero P/R/F1 treats values < zero_threshold (default 0.5) as the "zero" class.
+    update() expects raw model_output [B, N, H, 3] and raw count targets.
+      E[Y] = (1−π)·μ                    → MAE, RMSE, KL
+      P(Y=0) = π + (1−π)·NB(0|μ,r)     → zero-class classification
+      exact ZINB log-likelihood          → NLL
     """
 
-    def __init__(self, zero_threshold: float = 0.5, eps: float = 1e-8):
-        self.zero_threshold = zero_threshold
+    def __init__(self, eps: float = 1e-8):
         self.eps = eps
         self.reset()
 
     def reset(self):
-        self.sum_abs_err = 0.0
-        self.sum_sq_err = 0.0
-        self.sum_pred = 0.0
-        self.sum_pred_sq = 0.0
-        self.sum_target = 0.0
+        self.sum_abs_err   = 0.0
+        self.sum_sq_err    = 0.0
+        self.sum_pred      = 0.0
+        self.sum_pred_sq   = 0.0
+        self.sum_target    = 0.0
         self.sum_target_sq = 0.0
+        self.sum_nll       = 0.0
         self.tp = 0
         self.fp = 0
         self.fn = 0
-        self.n = 0
+        self.n  = 0
 
-    def update(self, output: torch.Tensor, target: torch.Tensor, mask: torch.Tensor):
+    def update(
+        self,
+        model_output: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor,
+    ):
         with torch.no_grad():
-            m = mask.bool()
-            pred = output[m].float()
-            tgt = target[m].float()
+            mu_raw, r_raw, pi_raw = model_output.unbind(dim=-1)
+            m    = mask.bool()
+            mu_m = F.softplus(mu_raw[m].float())
+            r_m  = F.softplus(r_raw[m].float())
+            pi_m = torch.sigmoid(pi_raw[m].float())
+            tgt  = target[m].float()
+
+            pred = (1.0 - pi_m) * mu_m  # ZINB expected value E[Y]
 
             err = pred - tgt
-            self.sum_abs_err += err.abs().sum().item()
-            self.sum_sq_err += (err ** 2).sum().item()
-            self.sum_pred += pred.sum().item()
-            self.sum_pred_sq += (pred ** 2).sum().item()
-            self.sum_target += tgt.sum().item()
+            self.sum_abs_err   += err.abs().sum().item()
+            self.sum_sq_err    += (err ** 2).sum().item()
+            self.sum_pred      += pred.sum().item()
+            self.sum_pred_sq   += (pred ** 2).sum().item()
+            self.sum_target    += tgt.sum().item()
             self.sum_target_sq += (tgt ** 2).sum().item()
 
-            pred_zero = pred < self.zero_threshold
-            tgt_zero = tgt < self.zero_threshold
+            # Exact ZINB NLL
+            log_r         = torch.log(r_m + self.eps)
+            log_mu        = torch.log(mu_m + self.eps)
+            log_r_plus_mu = torch.log(r_m + mu_m + self.eps)
+            log_nb = (
+                torch.lgamma(r_m + tgt)
+                - torch.lgamma(r_m)
+                - torch.lgamma(tgt + 1)
+                + r_m * (log_r - log_r_plus_mu)
+                + tgt * (log_mu - log_r_plus_mu)
+            )
+            log_nb_0 = r_m * (log_r - log_r_plus_mu)
+            log_pi   = torch.log(pi_m + self.eps)
+            log_1_pi = torch.log(1.0 - pi_m + self.eps)
+            log_lik  = torch.where(
+                tgt == 0,
+                torch.logaddexp(log_pi, log_1_pi + log_nb_0),
+                log_1_pi + log_nb,
+            )
+            self.sum_nll += (-log_lik).sum().item()
+
+            # Zero-class: predict zero when P(Y=0) > 0.5
+            log_p_zero = torch.logaddexp(log_pi, log_1_pi + log_nb_0)
+            pred_zero  = log_p_zero > math.log(0.5)
+            tgt_zero   = tgt == 0
             self.tp += (pred_zero & tgt_zero).sum().item()
             self.fp += (pred_zero & ~tgt_zero).sum().item()
             self.fn += (~pred_zero & tgt_zero).sum().item()
-            self.n += m.sum().item()
+            self.n  += m.sum().item()
 
     def compute(self) -> dict:
         if self.n == 0:
             return {k: 0.0 for k in ['mae', 'rmse', 'kl', 'zero_precision', 'zero_recall', 'zero_f1', 'nll']}
 
         n = self.n
-        mae = self.sum_abs_err / n
+        mae  = self.sum_abs_err / n
         rmse = math.sqrt(self.sum_sq_err / n)
+        nll  = self.sum_nll / n
 
-        # Gaussian KL: KL(pred || target)
-        mu_p = self.sum_pred / n
+        # Gaussian KL: KL(pred || target) from accumulated moments
+        mu_p  = self.sum_pred / n
         var_p = max(self.sum_pred_sq / n - mu_p ** 2, self.eps)
-        mu_q = self.sum_target / n
+        mu_q  = self.sum_target / n
         var_q = max(self.sum_target_sq / n - mu_q ** 2, self.eps)
         kl = 0.5 * (math.log(var_q / var_p) + var_p / var_q + (mu_p - mu_q) ** 2 / var_q - 1.0)
-
-        # Gaussian NLL with MLE variance (sigma^2 = MSE)
-        sigma2 = max(self.sum_sq_err / n, self.eps)
-        nll = 0.5 * (math.log(2 * math.pi * sigma2) + 1.0)
 
         # Zero-class precision / recall / F1
         tp, fp, fn = self.tp, self.fp, self.fn
