@@ -23,5 +23,7 @@ def get_config_options():
     parser.add_argument('--dataset_folder', type=str, default='/openbayes/input/input0', help='Dataset folder')
     parser.add_argument('--output_folder', type=str, default='output/', help='Where to save model logs and states')
     parser.add_argument('--name', type=str, help='Filename of state and log saves')
-    
+
+    parser.add_argument('--model', choices=['gcn', 'transformer'], default='gcn', help='Model architecture to use')
+
     return parser.parse_args()

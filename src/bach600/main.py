@@ -83,25 +83,51 @@ if use_cuda:
 
 # Model
 
-graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
+gcn_graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
 
 hidden_dim = 128
 
-model = gnn.Model(
-    gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, graph, pre_norm = False, norm="batch"),
-    gnn.GCNBlock(hidden_dim, hidden_dim, graph, residuals=True, pre_norm = False, norm="batch"),
-    gnn.GCNBlock(hidden_dim, hidden_dim, graph, residuals=True, pre_norm = False, norm="batch"),
-    gnn.GCNBlock(hidden_dim, hidden_dim, graph, residuals=True, pre_norm = False, norm="batch"),
-    gnn.GCNBlock(hidden_dim, 1 * opt.window_size, graph, pre_norm = False, norm="batch")
-)
+if opt.model == 'transformer':
+    # N_CLUSTERS=32 and ff_hidden_dim=hidden_dim keep params in range of GCN model:
+    #   F=2:   ~274K transformer vs ~56K GCN  (5x)
+    #   F=20:  ~296K transformer vs ~79K GCN  (4x)
+    #   F=200: ~528K transformer vs ~309K GCN (1.7x)
+    # MHA projections at dim=128 cost ~66K alone, so parity is not achievable at this hidden_dim.
+    N_CLUSTERS = 32
+
+    pool = gnn.GraphPooling(N, N_CLUSTERS, residual=True)
+
+    model = gnn.Model(
+        # Local feature extraction
+        gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, gcn_graph, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        # Pool N nodes -> K=32 supernodes
+        pool.pool,
+        # Global attention on supernodes (32x32 attention — trivially cheap)
+        gnn.GraphTransformerBlock(hidden_dim, num_heads=4, ff_hidden_dim=hidden_dim),
+        gnn.GraphTransformerBlock(hidden_dim, num_heads=4, ff_hidden_dim=hidden_dim, residuals=True),
+        # Unpool back to N nodes (with skip connection from before pooling)
+        pool.unpool,
+        # Refine
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, opt.window_size * 3, gcn_graph, pre_norm=False, norm="batch"),
+    )
+else:
+    model = gnn.Model(
+        gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, gcn_graph, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, opt.window_size * 3, gcn_graph, pre_norm=False, norm="batch"),
+    )
 model = model.to(device)
 
 if not opt.no_compile:
     model = torch.compile(model)
     print("Compiling model.")
 
-loss_crit = loss.MaskedHuberLoss()
-eval_crit = loss.SMAPEMeter()
+loss_crit = loss.MaskedZINBLoss()
+eval_crit = loss.EvalMeter()
 
 optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
 
@@ -135,18 +161,20 @@ for e in range(opt.max_epochs):
 
         features = features.to(device=device, non_blocking=True)
         unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
-        
+        target_counts = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0].float())
+
         with amp.autocast(device.type, enabled=use_mixed_precision):
-            
+
             # add mask to model input
             features_all = torch.cat((unseen_mask.unsqueeze(-1), features), dim=-1)
             # mask target input variable
             features_all[:, :, :, 1] *= unseen_mask
-            
+
             model_output = model(features_all)
-            
-            loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
-            
+            mu_raw, r_raw, pi_raw = model_output.unbind(dim=-1)
+
+            loss = loss_crit(mu_raw, r_raw, pi_raw, target_counts, 1 - unseen_mask)
+
             training_losses[i] = loss.detach()
             loss = loss / accumulate_steps
 
@@ -170,27 +198,27 @@ for e in range(opt.max_epochs):
             features_all[:, :, :, 1] *= unseen_mask
             
             model_output = model(features_all)
-            
-            loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
-            
-            validation_losses[i] = loss.detach()
-            
-            predicted_target = graph_features.feature_vars[0].apply_denorm(model_output.float())
+            mu_raw, r_raw, pi_raw = model_output.unbind(dim=-1)
+
             actual_target = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0].float())
-            
+            loss = loss_crit(mu_raw, r_raw, pi_raw, actual_target, 1 - unseen_mask)
+
+            validation_losses[i] = loss.detach()
+
+            predicted_target = torch.nn.functional.softplus(mu_raw.float())
             eval_crit.update(predicted_target, actual_target, 1 - unseen_mask)
             
 
     avg_train_loss = training_losses.mean().item()
     avg_val_loss = validation_losses.mean().item()
-    avg_validation_smape = eval_crit.compute()
-    
+    eval_metrics = eval_crit.compute()
+
     current_lr = optimizer.param_groups[0]['lr']
     logger.log_epoch(model, e, avg_val_loss, {
-        'learning_rate': current_lr, 
-        'average_training_loss': avg_train_loss, 
+        'learning_rate': current_lr,
+        'average_training_loss': avg_train_loss,
         'average_validation_loss': avg_val_loss,
-        'percentage_error': avg_validation_smape
+        **eval_metrics,
     })
 
     scheduler.step(avg_val_loss)
