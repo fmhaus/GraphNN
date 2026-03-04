@@ -133,13 +133,10 @@ optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
 
 scaler = amp.GradScaler(enabled=use_mixed_precision)
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer,
-    mode='min',
-    factor=0.5,
-    patience=5,
-    min_lr=1e-5,
-    threshold=1e-3
+    T_max=opt.max_epochs,
+    eta_min=1e-5,
 )
 
 early_stopping = utils.EarlyStopping(patience=10, min_delta=1e-3)
@@ -218,7 +215,7 @@ for e in range(opt.max_epochs):
         **eval_metrics,
     })
 
-    scheduler.step(avg_val_loss)
+    scheduler.step()
     
     if early_stopping(avg_val_loss):
         break
