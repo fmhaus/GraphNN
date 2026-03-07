@@ -21,73 +21,107 @@ class Variable():
         self.name = name
         self.type = type
         self.norm = norm
-    
-    def normalize(self, arr: np.ndarray):
-        if self.norm == NormType.Z_SCORE:
-            self.mean = arr.mean()
-            self.stdev = arr.std()
-            return (arr - self.mean) / (self.stdev + 1e-8)
-        elif self.norm == NormType.LOG_1P_Z_SCORE:
-            log1p = np.log1p(arr)
-            self.mean = log1p.mean()
-            self.stdev = log1p.std()
-            return (log1p - self.mean) / (self.stdev + 1e-8)
-        elif self.norm == NormType.MIN_MAX:
-            self.low, self.high = arr.min(), arr.max()
-            return (arr - self.low) / (self.high - self.low + 1e-8)
-        else:
-            return arr
-    
-    def transform_error(self, error: float):
-        if self.norm == NormType.Z_SCORE:
-            return error * (self.stdev + 1e-8)
-        elif self.norm == NormType.LOG_1P_Z_SCORE:
-            return math.exp(error * (self.stdev + 1e-8))
-        elif self.norm == NormType.MIN_MAX:
-            return error * (self.high - self.low + 1e-8)
-        else:
-            return error
-    
-    def encode(self, df: pd.DataFrame, store_half: bool):
-        col = df[self.name]
         
-        dtype = np.float16 if store_half else np.float32
+        # Per-node stats, shape (1, N, 1) for broadcasting over (B, N, T)
+        self.mean: torch.Tensor | None = None
+        self.stdev: torch.Tensor | None = None
+        self.low: torch.Tensor | None = None
+        self.high: torch.Tensor | None = None
+
+    def normalize(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        tensor: (N, T) — per node, over time
+        returns: (N, T) normalized
+        stores stats as (1, N, 1) for broadcasting
+        """
+        if self.norm == NormType.Z_SCORE:
+            self.mean  = tensor.mean(dim=1, keepdim=True)   # (N, 1)
+            self.stdev = tensor.std(dim=1, keepdim=True)    # (N, 1)
+            result = (tensor - self.mean) / (self.stdev + 1e-8)
+            # reshape for broadcasting over (B, N, T)
+            self.mean  = self.mean.unsqueeze(0)             # (1, N, 1)
+            self.stdev = self.stdev.unsqueeze(0)            # (1, N, 1)
+            return result
+
+        elif self.norm == NormType.LOG_1P_Z_SCORE:
+            log1p = torch.log1p(tensor)
+            self.mean  = log1p.mean(dim=1, keepdim=True)
+            self.stdev = log1p.std(dim=1, keepdim=True)
+            result = (log1p - self.mean) / (self.stdev + 1e-8)
+            self.mean  = self.mean.unsqueeze(0)
+            self.stdev = self.stdev.unsqueeze(0)
+            return result
+
+        elif self.norm == NormType.MIN_MAX:
+            self.low  = tensor.min(dim=1, keepdim=True).values
+            self.high = tensor.max(dim=1, keepdim=True).values
+            result = (tensor - self.low) / (self.high - self.low + 1e-8)
+            self.low  = self.low.unsqueeze(0)
+            self.high = self.high.unsqueeze(0)
+            return result
+
+        else:
+            return tensor
+
+    def apply_norm(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize arbitrary (B, N, T) or (N, T) tensor using stored stats.
+        """
+        if self.norm == NormType.Z_SCORE:
+            return (tensor - self.mean) / (self.stdev + 1e-8)
+        elif self.norm == NormType.LOG_1P_Z_SCORE:
+            return (torch.log1p(tensor) - self.mean) / (self.stdev + 1e-8)
+        elif self.norm == NormType.MIN_MAX:
+            return (tensor - self.low) / (self.high - self.low + 1e-8)
+        else:
+            return tensor
+
+    def apply_denorm(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Denormalize arbitrary (B, N, T) or (N, T) tensor using stored stats.
+        """
+        if self.norm == NormType.Z_SCORE:
+            self.stdev = self.stdev.to(tensor.device)
+            self.mean = self.mean.to(tensor.device)
+            return tensor * (self.stdev + 1e-8) + self.mean
+        elif self.norm == NormType.LOG_1P_Z_SCORE:
+            self.stdev = self.stdev.to(tensor.device)
+            self.mean = self.mean.to(tensor.device)
+            return torch.expm1(tensor * (self.stdev + 1e-8) + self.mean)
+        elif self.norm == NormType.MIN_MAX:
+            self.low = self.low.to(tensor.device)
+            self.high = self.high.to(tensor.device)
+            return tensor * (self.high - self.low + 1e-8) + self.low
+        else:
+            return tensor
+ 
+    def encode(self, df: pd.DataFrame, n_space: int, n_time: int, device: torch.device, store_half: bool):
+
+        col = df[self.name]
+        dtype = torch.float16 if store_half else torch.float32
 
         if col.isna().any():
             print(f"Column {self.name} has NaN values")
 
         if self.type == VariableType.NUMERICAL:
-            arr = col.to_numpy(dtype = np.float32)
-            if np.nanmax(arr) - np.nanmin(arr) < 1e-8:
-                print(f"Column {self.name} has 0 variance")
-            arr = self.normalize(arr).astype(dtype)
-            return arr[:, None]
+            arr = torch.from_numpy(col.to_numpy(np.float32)).to(device)
+            arr = arr.reshape(n_space, n_time)          # (N, T)
+            arr = self.normalize(arr)                   # stats stored as (1, N, 1)
+            return arr.unsqueeze(-1).to(dtype)          # (N, T, 1)
+
         elif self.type == VariableType.BINARY:
-            # represent True as 1 and False as 0
-            arr = col.astype(bool).astype(dtype).to_numpy()
-            if np.all(arr == arr[0]):
-                print(f"Column {self.name} has constant values")
-            return arr[:, None]
+            arr = torch.from_numpy(col.astype(bool).astype(np.float32).to_numpy()).to(device)
+            return arr.reshape(n_space, n_time, 1).to(dtype)
+
         elif self.type == VariableType.CATEGORICAL:
             cat = col.astype("category")
-            # get a codes array, represents NaN as -1 and other with their category index
             codes = cat.cat.codes.to_numpy()
             n_cat = len(cat.cat.categories)
-
-            if n_cat == 1:
-                print(f"Column {self.name} only has one category")
-
-            print(f"{n_cat} categories for {self.name}")
-                
-            # allocate one hot array for all unique categories
-            one_hot = np.zeros((len(col), n_cat), dtype=dtype)
-
-            # only assign to valid (not NaN) rows
-            valid_bitmap = codes >= 0
-            valid_row_indices = np.arange(len(col))[valid_bitmap]
-            # set the category to 1 for every valid (not NaN) row
-            one_hot[valid_row_indices, codes[valid_bitmap]] = 1
-            return one_hot
+            one_hot = np.zeros((len(col), n_cat), dtype=np.float32)
+            valid = codes >= 0
+            one_hot[np.arange(len(col))[valid], codes[valid]] = 1
+            arr = torch.from_numpy(one_hot).to(device)
+            return arr.reshape(n_space, n_time, n_cat).to(dtype)
 
 class FeatureOptions(Enum):
     TARGET_ONLY = 0
@@ -151,6 +185,9 @@ class GraphFeatures():
         elif feature_options == FeatureOptions.FEATURES_MINIMAL:
 
             self.feature_vars = [
+                # Target variable to predict
+                Variable("strava_total_trip_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE),
+                
                 # Temporal (core seasonality)
                 Variable("day_of_week", VariableType.CATEGORICAL),
                 Variable("month", VariableType.CATEGORICAL),
@@ -181,6 +218,8 @@ class GraphFeatures():
         elif feature_options == FeatureOptions.FEATURES_FULL:
 
             self.feature_vars = [
+                Variable("strava_total_trip_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE),
+                
                 # Temporal
                 Variable("day_of_week", VariableType.CATEGORICAL),
                 Variable("month", VariableType.CATEGORICAL),
@@ -195,7 +234,7 @@ class GraphFeatures():
                 Variable("socioeconomic_share_residents_5plus_years_same_address", VariableType.NUMERICAL, NormType.Z_SCORE),
                 Variable("socioeconomic_net_migration_per_100", VariableType.NUMERICAL, NormType.Z_SCORE),
                 Variable("socioeconomic_migration_volume_per_100", VariableType.NUMERICAL, NormType.Z_SCORE),
-                Variable("socioeconomic_share_under_18", VariableType.NUMERICAL, NormType.MIN_MAX),
+                Variable("socioeconomic_share_under_18", VariableType.NUMERICAL, NormType.Z_SCORE),
                 Variable("socioeconomic_share_65_and_older", VariableType.NUMERICAL, NormType.Z_SCORE),
                 Variable("socioeconomic_youth_dependency_ratio", VariableType.NUMERICAL, NormType.Z_SCORE),
                 Variable("socioeconomic_old_age_dependency_ratio", VariableType.NUMERICAL, NormType.Z_SCORE),
@@ -287,7 +326,6 @@ class GraphFeatures():
 
                 # Strava
                 Variable("strava_activity_type", VariableType.CATEGORICAL),
-                Variable("strava_total_trip_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE),
                 Variable("strava_ride_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE),
                 Variable("strava_ebike_ride_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE),
                 Variable("strava_total_people_count", VariableType.NUMERICAL, NormType.LOG_1P_Z_SCORE),
@@ -336,17 +374,9 @@ class GraphFeatures():
 
         feature_slices = []
         for var in self.feature_vars:
-            feature_slices.append(var.encode(df, store_half))
-            
-        tensor = np.concatenate(feature_slices, axis=1)
-        n_features = tensor.shape[1]
+            feature_slices.append(var.encode(df, self.n_space, self.n_time, device, store_half))
 
-        self.features_tensor = torch.from_numpy(tensor.reshape(self.n_space, self.n_time, n_features)).to(device=device)
-    
-    def get_multiplicative_error(self, mae):
-        target_var = self.feature_vars[0]
-        return target_var.transform_error(mae)
-        
+        self.features_tensor = torch.cat(feature_slices, dim=-1)            
         
 class MaskSet:
     def __init__(self, mask_count: int, space_dim: int, time_dim: int, kernel_size: int, 

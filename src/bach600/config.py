@@ -4,15 +4,10 @@ def get_config_options():
     parser = argparse.ArgumentParser()
 
     # train parameters
-    parser.add_argument('--max_epochs', type=int, default=1000, help='The maximum number of epochs to train for')
-    parser.add_argument('--initial_lr', type=float, default=3e-2, help='Initial learning rate')
-<<<<<<< HEAD
+    parser.add_argument('--max_epochs', type=int, default=200, help='The maximum number of epochs to train for')
+    parser.add_argument('--initial_lr', type=float, default=0.03, help='Initial learning rate')
     parser.add_argument('--batch_size', type=int, default=182, help='Batch size for training')
     parser.add_argument('--effective_batch_size', type=int, default=182, help='Batch size before updating gradients')
-=======
-    parser.add_argument('--batch_size', type=int, default=181, help='Batch size for training')
-    parser.add_argument('--effective_batch_size', type=int, default=181, help='Batch size before updating gradients')
->>>>>>> 54eb8d8ecd7307b5b7045859c12f424c9eefe072
     parser.add_argument('--no_cuda', action='store_true', default=False, help='Whether to not use gpu acceleration')
     parser.add_argument('--no_compile', action='store_true', default=False, help='Whether to compile the model')
     parser.add_argument('--mixed_precision', action='store_true', default=False, help='Use mixed precision instead of float32')
@@ -28,5 +23,7 @@ def get_config_options():
     parser.add_argument('--dataset_folder', type=str, default='/openbayes/input/input0', help='Dataset folder')
     parser.add_argument('--output_folder', type=str, default='output/', help='Where to save model logs and states')
     parser.add_argument('--name', type=str, help='Filename of state and log saves')
-    
+
+    parser.add_argument('--model', choices=['gcn', 'transformer'], default='gcn', help='Model architecture to use')
+
     return parser.parse_args()

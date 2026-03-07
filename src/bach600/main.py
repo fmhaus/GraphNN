@@ -83,40 +83,69 @@ if use_cuda:
 
 # Model
 
-graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
+gcn_graph = gnn.GCNGraph(graph_features.adjacency_matrix, device=device)
 
-model = gnn.Model(
-    gnn.GCNBlock((F+1) * opt.window_size, 64, graph, norm=None),
-    gnn.GCNBlock(64, 64, graph, residuals=True),
-    gnn.GCNBlock(64, 1 * opt.window_size, graph)
-)
+hidden_dim = 128
+
+if opt.model == 'transformer':
+    # N_CLUSTERS=32 and ff_hidden_dim=hidden_dim keep params in range of GCN model:
+    #   F=2:   ~274K transformer vs ~56K GCN  (5x)
+    #   F=20:  ~296K transformer vs ~79K GCN  (4x)
+    #   F=200: ~528K transformer vs ~309K GCN (1.7x)
+    # MHA projections at dim=128 cost ~66K alone, so parity is not achievable at this hidden_dim.
+    N_CLUSTERS = 32
+
+    pool = gnn.GraphPooling(N, N_CLUSTERS, residual=True)
+
+    model = gnn.Model(
+        # Local feature extraction
+        gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, gcn_graph, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        # Pool N nodes -> K=32 supernodes
+        pool.pool,
+        # Global attention on supernodes (32x32 attention — trivially cheap)
+        gnn.GraphTransformerBlock(hidden_dim, num_heads=4, ff_hidden_dim=hidden_dim),
+        gnn.GraphTransformerBlock(hidden_dim, num_heads=4, ff_hidden_dim=hidden_dim, residuals=True),
+        # Unpool back to N nodes (with skip connection from before pooling)
+        pool.unpool,
+        # Refine
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, opt.window_size * 3, gcn_graph, pre_norm=False, norm="batch"),
+    )
+else:
+    model = gnn.Model(
+        gnn.GCNBlock((F+1) * opt.window_size, hidden_dim, gcn_graph, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, hidden_dim, gcn_graph, residuals=True, pre_norm=False, norm="batch"),
+        gnn.GCNBlock(hidden_dim, opt.window_size * 3, gcn_graph, pre_norm=False, norm="batch"),
+    )
 model = model.to(device)
 
 if not opt.no_compile:
     model = torch.compile(model)
     print("Compiling model.")
 
-loss_crit = loss.MaskedMAE()
+loss_crit = loss.MaskedZINBLoss()
+eval_crit = loss.EvalMeter()
+
 optimizer = torch.optim.Adam(model.parameters(), lr=opt.initial_lr)
 
 scaler = amp.GradScaler(enabled=use_mixed_precision)
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer,
-    mode='min',
-    factor=0.5,
-    patience=3,
-    min_lr=1e-5,
-    threshold=1e-4
+    T_max=opt.max_epochs,
+    eta_min=1e-5,
 )
 
-early_stopping = utils.EarlyStopping(patience=10, min_delta=1e-4)
+early_stopping = utils.EarlyStopping(patience=10, min_delta=1e-3)
 
 start_time = time.time()
 
-
 training_losses = torch.empty(len(training_loader), device=dataset_device)
-validation_losses = torch.empty(len(validation_loader), device=dataset_device)    
+validation_losses = torch.empty(len(validation_loader), device=dataset_device)
+
 
 for e in range(opt.max_epochs):
 
@@ -127,20 +156,22 @@ for e in range(opt.max_epochs):
     
     for i, (features, unseen_mask) in enumerate(tqdm(training_loader, f"Training epoch {e+1}")):
 
+        features = features.to(device=device, non_blocking=True)
+        unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
+        target_counts = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0].float())
+
         with amp.autocast(device.type, enabled=use_mixed_precision):
-            features = features.to(device=device, non_blocking=True)
-            unseen_mask = unseen_mask.to(device=device, dtype=features.dtype, non_blocking=True)
-            
+
             # add mask to model input
             features_all = torch.cat((unseen_mask.unsqueeze(-1), features), dim=-1)
             # mask target input variable
             features_all[:, :, :, 1] *= unseen_mask
-            
+
             model_output = model(features_all)
-            
-            loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
-            
-            training_losses[i] = loss
+
+            loss = loss_crit(model_output, target_counts, 1 - unseen_mask)
+
+            training_losses[i] = loss.detach()
             loss = loss / accumulate_steps
 
         scaler.scale(loss).backward()
@@ -151,7 +182,8 @@ for e in range(opt.max_epochs):
             optimizer.zero_grad()
 
     model.eval()
-
+    eval_crit.reset()
+    
     with torch.no_grad():
 
         for i, (features, unseen_mask) in enumerate(tqdm(validation_loader, f"Validating epoch {e+1}")):
@@ -162,23 +194,28 @@ for e in range(opt.max_epochs):
             features_all[:, :, :, 1] *= unseen_mask
             
             model_output = model(features_all)
+
+            actual_target = graph_features.feature_vars[0].apply_denorm(features[:, :, :, 0].float())
+            loss = loss_crit(model_output, actual_target, 1 - unseen_mask)
+
+            validation_losses[i] = loss.detach()
+
+            eval_crit.update(model_output, actual_target, 1 - unseen_mask)
             
-            loss = loss_crit(model_output, features[:, :, :, 0], 1 - unseen_mask)
-            
-            validation_losses[i] = loss
 
     avg_train_loss = training_losses.mean().item()
     avg_val_loss = validation_losses.mean().item()
+    eval_metrics = eval_crit.compute()
 
     current_lr = optimizer.param_groups[0]['lr']
     logger.log_epoch(model, e, avg_val_loss, {
-        'learning_rate': current_lr, 
-        'average_training_loss': avg_train_loss, 
-        'average_validation_loss': avg_val_loss, 
-        'average_multiplicative_error': graph_features.get_multiplicative_error(avg_val_loss)
+        'learning_rate': current_lr,
+        'average_training_loss': avg_train_loss,
+        'average_validation_loss': avg_val_loss,
+        **eval_metrics,
     })
 
-    scheduler.step(avg_val_loss)
+    scheduler.step()
     
     if early_stopping(avg_val_loss):
         break
