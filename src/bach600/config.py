@@ -4,7 +4,7 @@ def get_config_options():
     parser = argparse.ArgumentParser()
 
     # train parameters
-    parser.add_argument('--max_epochs', type=int, default=200, help='The maximum number of epochs to train for')
+    parser.add_argument('--max_epochs', type=int, default=100, help='The maximum number of epochs to train for')
     parser.add_argument('--initial_lr', type=float, default=0.03, help='Initial learning rate')
     parser.add_argument('--batch_size', type=int, default=182, help='Batch size for training')
     parser.add_argument('--effective_batch_size', type=int, default=182, help='Batch size before updating gradients')
